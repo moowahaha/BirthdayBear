@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <title>Birthday Bear</title>
 <link rel="icon" type="image/png" href="assets/cake/cake.png">
 <style>
@@ -9,57 +12,111 @@
     margin: 0;
     padding: 0;
     background: #000;
+    width: 100%;
     height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    overflow: hidden;
     font-family: monospace;
     color: #fff;
-    overflow: hidden;
     user-select: none;
     -webkit-user-select: none;
     touch-action: none;
   }
-  #wrap { text-align: center; }
+  /* position: fixed pins the wrap to the *visible* viewport on mobile —
+     unlike 100vh which on iOS Safari includes the URL-bar region and
+     pushes the centered canvas below the visible center. */
+  #wrap {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+  }
   canvas {
     image-rendering: pixelated;
     image-rendering: -moz-crisp-edges;
     image-rendering: crisp-edges;
     background: #5c94fc;
-    border: 4px solid #222;
-    box-shadow: 0 0 32px #000;
     cursor: crosshair;
     touch-action: none;
+    max-width: 100%;
+    max-height: 100%;
   }
   #hud {
-    margin-top: 8px;
-    font-size: 12px;
+    position: fixed;
+    bottom: 4px;
+    left: 0;
+    right: 0;
+    font-size: 11px;
     letter-spacing: 2px;
     color: #fcfcfc;
+    text-shadow: 1px 1px 0 #000;
+    pointer-events: none;
+  }
+  @media (max-width: 480px) {
+    #hud { display: none; }
+  }
+  #mute {
+    position: fixed;
+    top: 6px;
+    left: 6px;
+    z-index: 10;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fcfc00;
+    border: 2px solid #fcfc00;
+    font-family: monospace;
+    font-size: 11px;
+    letter-spacing: 2px;
+    padding: 4px 8px;
+    cursor: pointer;
+    text-transform: uppercase;
+  }
+  #mute.muted {
+    color: #888;
+    border-color: #888;
   }
 </style>
 </head>
 <body>
+<button id="mute" type="button" aria-label="Toggle music">MUTE</button>
 <div id="wrap">
-  <canvas id="game" width="256" height="240"></canvas>
-  <div id="hud">CLICK / TAP TO PLACE OR REMOVE A BLOCK &nbsp; R RESTART</div>
+  <canvas id="game" width="320" height="240"></canvas>
 </div>
+<div id="hud">CLICK / TAP TO PLACE OR REMOVE A BLOCK</div>
 <script>
 (() => {
-  const W = 256, H = 240;
+  const W = 320, H = 240;     // 4:3 internal resolution
   const TILE = 16;
-  const COLS = 16;
-  const ROWS = 15;
+  const COLS = 20;            // 320 / 16
+  const ROWS = 15;            // 240 / 16
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
   ctx.imageSmoothingEnabled = false;
 
+  // Fluid scaling: maintain 4:3 aspect, fill the wrap container.
+  // We measure the wrap (which is position: fixed and pinned to the
+  // visible viewport) instead of window.innerHeight so we get the
+  // *actually visible* size on mobile — iOS Safari's window.innerHeight
+  // includes the URL-bar area which would push the centered canvas
+  // below the visible center.
+  const wrap = document.getElementById('wrap');
   function fit() {
-    const scale = Math.max(1, Math.floor(Math.min(window.innerWidth / W, (window.innerHeight - 60) / H)));
-    canvas.style.width = (W * scale) + 'px';
+    const aw = wrap.clientWidth;
+    const ah = wrap.clientHeight;
+    const scale = Math.min(aw / W, ah / H);
+    canvas.style.width  = (W * scale) + 'px';
     canvas.style.height = (H * scale) + 'px';
   }
   window.addEventListener('resize', fit);
+  window.addEventListener('orientationchange', fit);
+  // iOS fires this when the URL bar collapses/expands, but doesn't
+  // always fire 'resize' for the same event.
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', fit);
+  }
   fit();
 
   // -------- Sprites --------
@@ -86,14 +143,59 @@
   const splashImg = new Image();
   splashImg.src = 'assets/splash screen/splash screen.png';
 
+  const skittlesSprites = {};
+  const loadSkittles = (k, src) => { const i = new Image(); i.src = src; skittlesSprites[k] = i; };
+  loadSkittles('a', 'assets/skittles/skittles-1.png');
+  loadSkittles('b', 'assets/skittles/skittles-2.png');
+
   // -------- Background music (looped) --------
-  // Plays at half the effective volume of the SFX. Restarts on every
-  // level load. First call may be blocked by autoplay policy; we retry
-  // on the first user pointer/key interaction.
+  // Routed through the Web Audio graph via createMediaElementSource so a
+  // GainNode controls volume — iOS Safari often ignores the HTMLAudio
+  // .volume property, so without this the track plays at full level on
+  // mobile no matter what we set. The gain is the source of truth; the
+  // element's own volume stays at 1 so the two don't multiply.
   const music = new Audio('assets/music/Birthday Cartridge.mp3');
   music.loop = true;
-  music.volume = 0.125; // 50% quieter than before (was 0.25)
+  music.volume = 1;
+  const MUSIC_GAIN = 0.04;
+  let musicGain = null;
+  let musicConnected = false;
+  function connectMusicGraph() {
+    if (musicConnected) return;
+    try {
+      const ac = audio();
+      const src = ac.createMediaElementSource(music);
+      musicGain = ac.createGain();
+      musicGain.gain.value = music.muted ? 0 : MUSIC_GAIN;
+      src.connect(musicGain);
+      musicGain.connect(ac.destination);
+      musicConnected = true;
+    } catch (e) {}
+  }
+  // Mute toggle (persisted to localStorage so it survives refreshes).
+  const muteBtn = document.getElementById('mute');
+  const MUTE_KEY = 'birthday-bear-muted';
+  function applyMute(muted) {
+    music.muted = muted;
+    if (musicGain) musicGain.gain.value = muted ? 0 : MUSIC_GAIN;
+    muteBtn.textContent = muted ? 'UNMUTE' : 'MUTE';
+    muteBtn.classList.toggle('muted', muted);
+    try { localStorage.setItem(MUTE_KEY, muted ? '1' : '0'); } catch (e) {}
+  }
+  try {
+    if (localStorage.getItem(MUTE_KEY) === '1') applyMute(true);
+  } catch (e) {}
+  muteBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    applyMute(!music.muted);
+  });
+
   function startMusic() {
+    // Lazily wire the audio element into the Web Audio graph (must happen
+    // after the AudioContext exists, and ideally during a user gesture).
+    connectMusicGraph();
+    // iOS starts the AudioContext suspended; resume on every gesture.
+    try { if (actx && actx.state === 'suspended') actx.resume(); } catch (e) {}
     // Always rewind to 0. Only call play() if the element is actually
     // paused — calling play() on an already-playing element queues a
     // second start that overlaps the current playhead, and pausing then
@@ -131,6 +233,26 @@
     } catch (e) {}
   }
   function placeSfx()  { beep(440, 0.05); }
+  // Cute slide-whistle "wee!" — a triangle-wave pitch sweep that rises
+  // sharply, then settles. Played once per fall as a Lilian leaves
+  // the ground.
+  function weeSfx() {
+    try {
+      const a = audio();
+      const o = a.createOscillator();
+      const g = a.createGain();
+      o.type = 'triangle';
+      const t = a.currentTime;
+      o.frequency.setValueAtTime(420, t);
+      o.frequency.exponentialRampToValueAtTime(1100, t + 0.10);
+      o.frequency.exponentialRampToValueAtTime(820, t + 0.24);
+      g.gain.setValueAtTime(0.04, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.27);
+      o.connect(g); g.connect(a.destination);
+      o.start(t);
+      o.stop(t + 0.28);
+    } catch (e) {}
+  }
   function explodeSfx() {
     // quick descending zap with a noise tail
     beep(660, 0.04, 'square', 0.08);
@@ -322,6 +444,32 @@
         '...............G',
       ],
     },
+    {
+      // CRAZY MODE — bonus level offered after winning the seven regular
+      // levels. Five spawn doors across the top, 25 Lilians total (5 per
+      // door, burst-spawned), one cake. Authored at the full 20-column
+      // width since this level uses the wider 4:3 canvas.
+      name: 'CRAZY MODE',
+      hint: 'FIVE DOORS - GOOD LUCK',
+      bears: 25,
+      map: [
+        '....................',
+        '.S....S....S...S...S',
+        '###..###..###..###.#',
+        '....................',
+        '....................',
+        '....................',
+        '..######....######..',
+        '....................',
+        '....................',
+        '....................',
+        '##.....######.....##',
+        '....................',
+        '....................',
+        '......######G#......',
+        '....................',
+      ],
+    },
   ];
 
   // -------- Game state --------
@@ -329,14 +477,33 @@
   let tiles = [];           // 2D char array of the static level
   let userBlocks = new Set(); // 'col,row' strings
   let bears = [];
-  let spawnPos = { col: 0, row: 0 };
+  let spawnPositions = [];   // multi-door support: each 'S' tile becomes a spawn
   let goalPositions = [];
   let spawnTimer = 0;
   let spawnedCount = 0;
-  let totalBears = 0;       // 1 for level 1, +1 each level
+  let totalBears = 0;       // 1 for level 1, +1 each level (overridable per-level)
   let savedCount = 0;
   let diedCount = 0;
-  let levelState = 'splash';  // 'splash' | 'playing' | 'won' | 'failed' | 'gameover'
+  let levelState = 'splash';  // 'splash' | 'playing' | 'won' | 'failed' | 'skittlesAte' | 'gameover'
+
+  // Skittles — parachuting cat that descends from above the cake on a
+  // 20-second timer. If she reaches the cake before all Lilians are
+  // saved, the level fails.
+  const skittles = {
+    x: 0, y: 0,
+    startY: -20, endY: 0,
+    framesElapsed: 0,
+    totalFrames: 35 * 60, // overwritten per-level in loadLevel
+    pose: 'a',
+    poseFrame: 0,
+    poseToggleAt: 60,
+    active: false,
+  };
+  let cakeExploded = false;
+  // Tracks whether the player has finished crazy mode this run. Once true,
+  // the gameover screen drops the CRAZY MODE button and only offers
+  // PLAY AGAIN. Reset by resetToSplash().
+  let crazyCleared = false;
   let stateTimer = 0;
   let frame = 0;
   let confetti = [];
@@ -366,7 +533,13 @@
     }
     levelIdx = idx;
     const def = LEVELS[idx];
-    tiles = def.map.map(row => row.split(''));
+    // Pad each row to COLS and add empty rows up to ROWS so level data
+    // can stay authored at 16 chars even though the canvas is now 20.
+    tiles = def.map.map(row => {
+      const arr = row.split('');
+      while (arr.length < COLS) arr.push('.');
+      return arr;
+    });
     while (tiles.length < ROWS) tiles.push('.'.repeat(COLS).split(''));
     userBlocks = new Set();
     bears = [];
@@ -378,13 +551,43 @@
     levelState = 'playing';
     stateTimer = 0;
     confetti = [];
-    totalBears = 1 + idx;
+    spawnPositions = [];
     for (let r = 0; r < ROWS; r++) {
       for (let c = 0; c < COLS; c++) {
-        if (tiles[r][c] === 'S') spawnPos = { col: c, row: r };
+        if (tiles[r][c] === 'S') spawnPositions.push({ col: c, row: r });
         if (tiles[r][c] === 'G') goalPositions.push({ col: c, row: r });
       }
     }
+    if (spawnPositions.length === 0) spawnPositions.push({ col: 0, row: 0 });
+    // Per-level bear count override (e.g. crazy mode), else +1 per level.
+    totalBears = (def.bears !== undefined) ? def.bears : (1 + idx);
+
+    // Skittles: park her above the (first) cake, descending over 20 s.
+    cakeExploded = false;
+    if (goalPositions.length > 0) {
+      const goal = goalPositions[0];
+      // Skittles is drawn 28 px tall, cake sprite 18 px tall sitting just
+      // above the goal tile (whose top is goal.row * TILE). Stop her so
+      // her feet land on the cake's top edge — that's the contact frame.
+      const SKITTLES_DRAW_H = 28;
+      const CAKE_DRAW_H     = 18;
+      skittles.x = goal.col * TILE + TILE / 2;
+      skittles.startY = -SKITTLES_DRAW_H;
+      skittles.endY = goal.row * TILE - CAKE_DRAW_H + 1 - SKITTLES_DRAW_H;
+      // Crazy mode (the final level) keeps the original 30 s descent;
+      // every regular level gets an extra 5 s.
+      const isCrazy = idx === LEVELS.length - 1;
+      skittles.totalFrames = (isCrazy ? 30 : 35) * 60;
+      skittles.framesElapsed = 0;
+      skittles.y = skittles.startY;
+      skittles.pose = 'a';
+      skittles.poseFrame = 0;
+      skittles.poseToggleAt = 60 + Math.floor(Math.random() * 121); // 1–3 s
+      skittles.active = true;
+    } else {
+      skittles.active = false;
+    }
+
     startMusic();
   }
 
@@ -413,6 +616,7 @@
     confetti = [];
     sunStunFrames = 0;
     splashInputCooldown = 30; // ~half a second
+    crazyCleared = false;
   }
 
   // -------- Tile queries --------
@@ -451,13 +655,23 @@
       loadLevel(0);
       return;
     }
-    if (levelState === 'won' || levelState === 'gameover') {
-      // any tap advances to next level / restarts game
-      if (levelState === 'won') loadLevel(levelIdx + 1);
-      else if (levelState === 'gameover') resetToSplash();
+    if (levelState === 'won') {
+      loadLevel(levelIdx + 1);
       return;
     }
-    if (levelState === 'failed') {
+    if (levelState === 'gameover') {
+      if (crazyCleared) {
+        // Crazy already beaten — only PLAY AGAIN is offered. Any tap restarts.
+        resetToSplash();
+      } else {
+        // Left half = crazy mode, right half = play again.
+        const { x } = canvasCoords(clientX, clientY);
+        if (x < W / 2) loadLevel(LEVELS.length - 1);
+        else resetToSplash();
+      }
+      return;
+    }
+    if (levelState === 'failed' || levelState === 'skittlesAte') {
       loadLevel(levelIdx);
       return;
     }
@@ -513,10 +727,10 @@
         loadLevel(0);
       }
       else if (levelState === 'won') loadLevel(levelIdx + 1);
-      else if (levelState === 'failed') loadLevel(levelIdx);
+      else if (levelState === 'failed' || levelState === 'skittlesAte') loadLevel(levelIdx);
       else if (levelState === 'gameover') resetToSplash();
     } else if (e.code === 'KeyN') {
-      // Skip level (debug aid)
+      // Debug skip-level
       e.preventDefault();
       loadLevel(levelIdx + 1);
     }
@@ -526,11 +740,11 @@
   const BEAR_W = 10;
   const BEAR_H = 14;
 
-  function spawnBear() {
-    const cx = spawnPos.col * TILE + TILE / 2;
+  function spawnBearAt(sp) {
+    const cx = sp.col * TILE + TILE / 2;
     bears.push({
       x: cx - BEAR_W / 2,
-      y: spawnPos.row * TILE,
+      y: sp.row * TILE,
       vy: 0,
       facing: Math.random() < 0.5 ? -1 : 1,
       onGround: false,
@@ -539,6 +753,17 @@
       dying: 0,
       anim: Math.floor(Math.random() * 60),
     });
+  }
+  // Burst-spawns one Lilian per door simultaneously. With a single door
+  // (regular levels) this matches the previous behaviour exactly. With
+  // multiple doors (crazy mode) all doors emit at the same cadence so
+  // the player gets parallel waves to manage.
+  function spawnWave() {
+    for (const sp of spawnPositions) {
+      if (spawnedCount >= totalBears) break;
+      spawnBearAt(sp);
+      spawnedCount++;
+    }
   }
 
   // Returns true if any tile in [colA..colB] at given row is solid
@@ -554,6 +779,7 @@
       return;
     }
     b.anim++;
+    const wasOnGround = b.onGround;
 
     const SPEED = 0.256; // another 20% slower (0.32 * 0.8)
 
@@ -626,6 +852,11 @@
       }
     }
 
+    // Cute "wee!" SFX on the transition from grounded to airborne.
+    // Per-bear, fires once per fall (next frame wasOnGround is already
+    // false, so it doesn't retrigger mid-air).
+    if (wasOnGround && !b.onGround) weeSfx();
+
     // Goal check — feet stand on a goal tile
     if (b.onGround) {
       const lc = Math.floor(b.x / TILE);
@@ -664,18 +895,40 @@
   function update() {
     frame++;
     if (levelState === 'playing') {
-      // Spawn bears on a timer until total reached
+      // Spawn bears on a timer. Each tick is a wave — one Lilian per
+      // active spawn door — so single-door levels are unchanged but
+      // crazy mode emits 5 at a time.
       if (spawnedCount < totalBears) {
         spawnTimer--;
         if (spawnTimer <= 0) {
-          spawnBear();
-          spawnedCount++;
+          spawnWave();
           spawnTimer = 70;
         }
       }
       bears.forEach(updateBear);
       // Drop bears whose dying anim finished
       bears = bears.filter(b => b.alive || b.dying < 30);
+
+      // Skittles descent
+      if (skittles.active) {
+        skittles.framesElapsed++;
+        skittles.poseFrame++;
+        if (skittles.poseFrame >= skittles.poseToggleAt) {
+          skittles.poseFrame = 0;
+          skittles.poseToggleAt = 60 + Math.floor(Math.random() * 121);
+          skittles.pose = skittles.pose === 'a' ? 'b' : 'a';
+        }
+        const t = Math.min(1, skittles.framesElapsed / skittles.totalFrames);
+        skittles.y = skittles.startY + t * (skittles.endY - skittles.startY);
+        if (skittles.framesElapsed >= skittles.totalFrames) {
+          // Skittles ate the cake. Game over for this level.
+          skittles.active = false;
+          explodeCake();
+          levelState = 'skittlesAte';
+          stateTimer = 0;
+        }
+      }
+
       // Fail the moment a single Lilian is lost — don't wait for the
       // remaining spawns to play out.
       if (diedCount > 0 && levelState === 'playing') {
@@ -683,10 +936,19 @@
         stateTimer = 0;
       }
       // Win when every spawned-and-tracked Lilian has reached the cake.
-      else if (savedCount === totalBears && spawnedCount === totalBears) {
-        if (levelIdx + 1 >= LEVELS.length) {
-          // Final level cleared — skip the "LEVEL CLEAR" screen and go
-          // straight to the HAPPY BIRTHDAY game-over.
+      // Guard with state check: Skittles' arrival earlier this same frame
+      // could have already flipped the state to 'skittlesAte'.
+      else if (levelState === 'playing' &&
+               savedCount === totalBears && spawnedCount === totalBears) {
+        const isLast       = levelIdx === LEVELS.length - 1;
+        const isPenultimate = levelIdx === LEVELS.length - 2;
+        // Cake explodes in celebration when the last Lilian is saved.
+        explodeCake();
+        skittles.active = false;
+        if (isLast || isPenultimate) {
+          // Either the final regular level OR crazy mode cleared — show
+          // the HAPPY BIRTHDAY screen, which itself offers crazy mode.
+          if (isLast) crazyCleared = true;
           levelState = 'gameover';
           stateTimer = 0;
           winFanfare();
@@ -753,6 +1015,32 @@
         color: colors[Math.floor(Math.random() * colors.length)],
       });
     }
+  }
+
+  // Bigger, more frosting-colored burst for the cake itself. Triggered
+  // both on Skittles arrival (failure) and the last-Lilian save (win).
+  function explodeCake() {
+    if (cakeExploded) return;
+    cakeExploded = true;
+    const goal = goalPositions[0];
+    if (!goal) return;
+    const cx = goal.col * TILE + TILE / 2;
+    const cy = goal.row * TILE - 6;
+    const colors = ['#fc74b4', '#fcfcfc', '#fcfc00', '#fc7460', '#fc4040', '#a83020'];
+    for (let i = 0; i < 36; i++) {
+      const ang = (i / 36) * Math.PI * 2 + Math.random() * 0.5;
+      const spd = 1.6 + Math.random() * 2.6;
+      particles.push({
+        x: cx, y: cy,
+        vx: Math.cos(ang) * spd,
+        vy: Math.sin(ang) * spd - 1.2,
+        life: 32 + Math.floor(Math.random() * 24),
+        color: colors[Math.floor(Math.random() * colors.length)],
+      });
+    }
+    // bigger boom
+    explodeSfx();
+    setTimeout(() => beep(80, 0.25, 'sawtooth', 0.06), 60);
   }
 
   // -------- Drawing --------
@@ -894,6 +1182,7 @@
     // Cake sits on a platform tile. Draw the rock under it, then the
     // cake sprite centered just above the platform.
     drawRockTile(col, row);
+    if (cakeExploded) return; // suppress cake + flame after the boom
     const cx = col * TILE + TILE / 2;
     const top = row * TILE;
     const cakeW = 18, cakeH = 18;
@@ -1098,7 +1387,7 @@
   }
 
   function drawHud() {
-    const lvlStr = 'LVL ' + (levelIdx + 1);
+    const lvlStr = (levelIdx === LEVELS.length - 1) ? 'CRAZY' : ('LVL ' + (levelIdx + 1));
     const savedStr = 'SAVED ' + savedCount + '/' + totalBears;
     drawTextShadow(lvlStr, 4, 4, PAL.text);
     drawTextShadow(savedStr, 56, 4, PAL.cakeY);
@@ -1128,10 +1417,15 @@
       ctx.fillStyle = 'rgba(0,0,0,0.55)';
       ctx.fillRect(0, 80, W, 80);
       drawTextCentered('A LILIAN WAS LOST', 92, '#fc7460', 2);
-      drawTextCentered('TAP / R TO RETRY', 124, PAL.text, 1);
+      drawTextCentered('TAP TO RETRY', 124, PAL.text, 1);
+    } else if (levelState === 'skittlesAte') {
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(0, 78, W, 92);
+      drawTextCentered('SKITTLES ATE THE CAKE!', 92, '#fc74b4', 2);
+      drawTextCentered('TAP TO RETRY', 132, PAL.text, 1);
     } else if (levelState === 'gameover') {
       ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      ctx.fillRect(0, 50, W, 140);
+      ctx.fillRect(0, 50, W, 160);
       const colors = [PAL.cakeB, PAL.cakeY, PAL.cakeA, '#5cf4fc', '#74fc74'];
       const msg = 'HAPPY BIRTHDAY!';
       const scale = 2;
@@ -1153,8 +1447,33 @@
           }
         }
       }
-      drawTextCentered('ALL LILIANS REACHED THE CAKE', 130, PAL.text, 1);
-      drawTextCentered('TAP / SPACE TO PLAY AGAIN', 152, PAL.cakeY, 1);
+      drawTextCentered('ALL LILIANS REACHED THE CAKE', 122, PAL.text, 1);
+      drawTextCentered('GO BEAR! 12 YEARS A CHAMPION', 138, PAL.cakeB, 1);
+      drawTextCentered('LOVE YOU!!', 150, PAL.cakeB, 1);
+      const btnY = 168, btnH = 24;
+      const drawBtnLabel = (text, x, w) => {
+        const tw = text.length * 6 - 1;
+        drawText(text, Math.round(x + (w - tw) / 2), btnY + 10, '#000', 1);
+      };
+      if (crazyCleared) {
+        // After conquering crazy mode there's only one option.
+        const w = 130, x = (W - w) / 2;
+        ctx.fillStyle = '#fcfcfc';
+        ctx.fillRect(x, btnY, w, btnH);
+        drawBtnLabel('PLAY AGAIN', x, w);
+        drawTextCentered('TAP TO RESTART', 200, PAL.cakeY, 1);
+      } else {
+        // Two-button choice: crazy mode (left) vs play again (right).
+        const lW = 110, lX = W / 4 - lW / 2;
+        const rW = 110, rX = (3 * W) / 4 - rW / 2;
+        ctx.fillStyle = '#fc74b4';
+        ctx.fillRect(lX, btnY, lW, btnH);
+        ctx.fillStyle = '#fcfcfc';
+        ctx.fillRect(rX, btnY, rW, btnH);
+        drawBtnLabel('CRAZY MODE', lX, lW);
+        drawBtnLabel('PLAY AGAIN', rX, rW);
+        drawTextCentered('TAP A SIDE', 200, PAL.cakeY, 1);
+      }
       // Spawn confetti continuously
       if (stateTimer % 3 === 0) {
         for (let i = 0; i < 2; i++) {
@@ -1179,14 +1498,25 @@
       const y = 6;
       ctx.drawImage(splashImg, x, y, size, size);
     }
-    drawTextCentered('PLACE BLOCKS TO GUIDE THE LILIAN', 156, PAL.text, 1);
-    drawTextCentered('CLICK A BLOCK TO DESTROY IT', 168, PAL.text, 1);
-    drawTextCentered('REACH THE CAKE TO WIN', 180, PAL.text, 1);
+    drawTextCentered('PLACE BLOCKS TO SAVE THE WANDERING LILIANS', 158, PAL.text, 1);
+    drawTextCentered('STEER THEM TO THE CAKE', 172, PAL.text, 1);
+    drawTextCentered('...BEFORE SKITTLES EATS IT!', 184, '#fc74b4', 1);
     if (Math.floor(frame / 30) % 2 === 0) {
-      drawTextCentered('PRESS SPACE OR TAP TO START', 200, PAL.cakeY, 1);
+      drawTextCentered('TAP TO START', 204, PAL.cakeY, 1);
     }
     const year = new Date().getFullYear();
     drawTextCentered('(C) ' + year + ' STEPHEN HARDISTY', 224, PAL.text, 1);
+  }
+
+  function drawSkittles() {
+    if (!skittles.active) return;
+    const img = skittlesSprites[skittles.pose];
+    if (!img || !img.complete || img.naturalWidth === 0) return;
+    const H = 28;
+    const W_S = H * img.naturalWidth / img.naturalHeight;
+    const dx = Math.round(skittles.x - W_S / 2);
+    const dy = Math.round(skittles.y);
+    ctx.drawImage(img, dx, dy, W_S, H);
   }
 
   function draw() {
@@ -1197,6 +1527,7 @@
     drawBackground();
     drawSun();
     drawTiles();
+    drawSkittles();
     for (const b of bears) drawBear(b);
     drawParticles();
     drawConfetti();
