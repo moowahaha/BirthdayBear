@@ -499,6 +499,9 @@
 
   window.addEventListener('keydown', e => {
     if (e.repeat) return; // ignore keyboard auto-repeat
+    // Don't hijack browser shortcuts: Cmd+R / Ctrl+R / Cmd+Shift+R refresh,
+    // Cmd+W close, etc. Modifier-bearing key combos always pass through.
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.code === 'KeyR') {
       e.preventDefault();
       loadLevel(levelIdx);

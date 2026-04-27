@@ -1,0 +1,10 @@
+.git
+.gitignore
+.gcloudignore
+.idea
+*.iml
+.DS_Store
+**/.DS_Store
+.claude
+Makefile
+README.md

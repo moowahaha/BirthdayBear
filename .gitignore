@@ -41,3 +41,4 @@ build/
 
 # Claude / agent state
 .claude/
+
