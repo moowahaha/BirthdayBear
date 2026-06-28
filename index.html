@@ -1,0 +1,1539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Birthday Bear</title>
+<!-- Wonderbox game SDK — required for every Wonderbox game. It forwards the console's
+     key input to the game (arrows / Space) and owns pause + quit. The console rewrites
+     this URL to a copy it serves locally, so the game still works fully offline. -->
+<script src="https://doc-matrix.com/wonderbox.min.js"></script>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #000;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: monospace;
+    color: #fff;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+  }
+  /* position: fixed pins the wrap to the *visible* viewport on mobile —
+     unlike 100vh which on iOS Safari includes the URL-bar region and
+     pushes the centered canvas below the visible center. */
+  #wrap {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+  }
+  canvas {
+    image-rendering: pixelated;
+    image-rendering: -moz-crisp-edges;
+    image-rendering: crisp-edges;
+    background: #5c94fc;
+    cursor: crosshair;
+    touch-action: none;
+    max-width: 100%;
+    max-height: 100%;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="320" height="240"></canvas>
+</div>
+<script>
+(() => {
+  const W = 320, H = 240;     // 4:3 internal resolution
+  const TILE = 16;
+  const COLS = 20;            // 320 / 16
+  const ROWS = 15;            // 240 / 16
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+
+  // Fluid scaling: maintain 4:3 aspect, fill the wrap container.
+  // We measure the wrap (which is position: fixed and pinned to the
+  // visible viewport) instead of window.innerHeight so we get the
+  // *actually visible* size on mobile — iOS Safari's window.innerHeight
+  // includes the URL-bar area which would push the centered canvas
+  // below the visible center.
+  const wrap = document.getElementById('wrap');
+  function fit() {
+    const aw = wrap.clientWidth;
+    const ah = wrap.clientHeight;
+    const scale = Math.min(aw / W, ah / H);
+    canvas.style.width  = (W * scale) + 'px';
+    canvas.style.height = (H * scale) + 'px';
+  }
+  window.addEventListener('resize', fit);
+  window.addEventListener('orientationchange', fit);
+  // iOS fires this when the URL bar collapses/expands, but doesn't
+  // always fire 'resize' for the same event.
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', fit);
+  }
+  fit();
+
+  // -------- Sprites --------
+  const bearSprites = {};
+  function loadSprite(key, src) {
+    const img = new Image();
+    img.src = src;
+    bearSprites[key] = img;
+  }
+  loadSprite('stand', 'assets/bear/stand.png');
+  loadSprite('walk1', 'assets/bear/walk-1.png');
+  loadSprite('walk2', 'assets/bear/walk-2.png');
+  loadSprite('jump',  'assets/bear/jump.png');
+
+  const cakeImg = new Image();
+  cakeImg.src = 'assets/cake/cake.png';
+
+  const sunSprites = {};
+  const loadSun = (k, src) => { const i = new Image(); i.src = src; sunSprites[k] = i; };
+  loadSun('sun1',    'assets/sun/sun_1.png');
+  loadSun('sun2',    'assets/sun/sun_2.png');
+  loadSun('stunned', 'assets/sun/sun_stunned.png');
+
+  const splashImg = new Image();
+  splashImg.src = 'assets/splash screen/splash screen.png';
+
+  const skittlesSprites = {};
+  const loadSkittles = (k, src) => { const i = new Image(); i.src = src; skittlesSprites[k] = i; };
+  loadSkittles('a', 'assets/skittles/skittles-1.png');
+  loadSkittles('b', 'assets/skittles/skittles-2.png');
+
+  // -------- Background music (looped) — via the Wonderbox SDK --------
+  // The SDK plays the track with plain media playback, so it works cross-origin inside the
+  // sandboxed console (no CORS taint, no Web Audio wiring) and starts on autoplay / first input.
+  // Sound effects below stay synthesized via the Web Audio context (`audio()`). volume 0.04
+  // matches the old 4% music gain on this loudly-mastered track.
+  Wonderbox.music.set('assets/music/Birthday Cartridge.mp3', { volume: 0.04, autoplay: false });
+  function startMusic() {
+    try { if (actx && actx.state === 'suspended') actx.resume(); } catch (e) {}  // keep the SFX context awake
+    Wonderbox.music.play();
+  }
+
+  // -------- Audio --------
+  let actx;
+  function audio() {
+    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+    return actx;
+  }
+  function beep(freq, dur, type = 'square', vol = 0.05) {
+    try {
+      const a = audio();
+      const o = a.createOscillator();
+      const g = a.createGain();
+      o.type = type;
+      o.frequency.value = freq;
+      g.gain.value = vol;
+      o.connect(g); g.connect(a.destination);
+      const t = a.currentTime;
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.start(t);
+      o.stop(t + dur);
+    } catch (e) {}
+  }
+  function placeSfx()  { beep(440, 0.05); }
+  function cursorSfx() { beep(540, 0.014, 'square', 0.02); }   // soft tick on arrow-key move
+  // Low two-note buzz — "you can't place a block here" (door, wall, or cake).
+  function denySfx()   { beep(200, 0.08, 'sawtooth', 0.05); setTimeout(() => beep(130, 0.10, 'sawtooth', 0.045), 55); }
+  // Cute slide-whistle "wee!" — a triangle-wave pitch sweep that rises
+  // sharply, then settles. Played once per fall as a Lilian leaves
+  // the ground.
+  function weeSfx() {
+    try {
+      const a = audio();
+      const o = a.createOscillator();
+      const g = a.createGain();
+      o.type = 'triangle';
+      const t = a.currentTime;
+      o.frequency.setValueAtTime(420, t);
+      o.frequency.exponentialRampToValueAtTime(1100, t + 0.10);
+      o.frequency.exponentialRampToValueAtTime(820, t + 0.24);
+      g.gain.setValueAtTime(0.04, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.27);
+      o.connect(g); g.connect(a.destination);
+      o.start(t);
+      o.stop(t + 0.28);
+    } catch (e) {}
+  }
+  function explodeSfx() {
+    // quick descending zap with a noise tail
+    beep(660, 0.04, 'square', 0.08);
+    setTimeout(() => beep(330, 0.08, 'sawtooth', 0.07), 20);
+    setTimeout(() => beep(140, 0.12, 'sawtooth', 0.05), 70);
+  }
+  function turnSfx()   { beep(330, 0.04, 'triangle', 0.03); }
+  function saveSfx()   { beep(880, 0.06); setTimeout(() => beep(1320, 0.08), 50); }
+  function dieSfx()    { beep(160, 0.18, 'sawtooth', 0.05); }
+  function levelSfx()  {
+    const notes = [523, 659, 784, 1047];
+    notes.forEach((f, i) => setTimeout(() => beep(f, 0.16, 'square', 0.06), i * 110));
+  }
+  function winFanfare() {
+    const notes = [523, 659, 784, 1047, 1319, 1568];
+    notes.forEach((f, i) => setTimeout(() => beep(f, 0.18, 'square', 0.07), i * 130));
+  }
+
+  // -------- Level data --------
+  // '.' empty, '#' wall (level), 'S' spawn, 'G' goal/cake (also acts as solid)
+  const LEVELS = [
+    {
+      // Solution (right-walking spawn): block at (col 10, row 4) reverses
+      // the Lilian on the middle catch, who then drops to the goal ledge
+      // and walks left into G. Left-walking spawns also need a reverse
+      // block at (col 0, row 1).
+      name: 'TURN HER AROUND',
+      hint: 'GUIDE HER BACK TO THE CAKE',
+      map: [
+        '................',
+        '..S.............',
+        '.######.........',
+        '................',
+        '................',
+        '....######......',
+        '................',
+        '................',
+        '................',
+        '..G####.........',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+      ],
+    },
+    {
+      name: 'TURN AROUND',
+      hint: 'STOP THEM FROM WALKING OFF',
+      map: [
+        '................',
+        '.....S..........',
+        '..#######.......',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        'G#####..........',
+        '................',
+        '................',
+        '................',
+      ],
+    },
+    {
+      // Solution: place 1 block at (col 5, row 1) to reverse the bear,
+      // then 1 block at (col 0, row 11) to give them a landing pad next
+      // to the cake. Bear walks left off start, falls, lands on the user
+      // block, hits the side wall, reverses, and steps onto G.
+      name: 'CATCH THEM',
+      hint: 'TURN THEM AND CATCH THEM',
+      map: [
+        '................',
+        '..S.............',
+        '.########.......',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '.G##............',
+        '................',
+        '................',
+        '................',
+      ],
+    },
+    {
+      // Solution: build a 5-block bridge in row 2 (cols 9..13) extending
+      // the start platform. The bear walks across, falls off at col 14,
+      // and lands on the lone cake tile.
+      name: 'BUILD A BRIDGE',
+      hint: 'FILL THE GAP',
+      map: [
+        '................',
+        '.....S..........',
+        '..########......',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '..............G.',
+        '................',
+        '................',
+        '................',
+      ],
+    },
+    {
+      // Solution: extend row 6 platform with 3 blocks at cols 11..13.
+      // Bear lands on row 6 at col 5, walks across the extended bridge,
+      // falls off at col 14, and drops a long way onto the lone cake.
+      name: 'THE LONG WAY',
+      hint: 'EXTEND THE PATH',
+      map: [
+        '................',
+        '..S.............',
+        '.########.......',
+        '................',
+        '................',
+        '................',
+        '.....#####......',
+        '................',
+        '................',
+        '................',
+        '................',
+        '..####..........',
+        '................',
+        '................',
+        '..............G.',
+      ],
+    },
+    {
+      // Solution: 1 block at (col 13, row 12) makes right-walking bears
+      // reverse on the cake platform and reach G. For left-walking bears,
+      // an extra block at (col 4, row 1) reverses them at the start.
+      // The middle platforms are red herrings — bears fall straight past
+      // them down the central column.
+      name: 'STRAIGHT DROP',
+      hint: 'TURN THEM ON THE LAST LEDGE',
+      map: [
+        '................',
+        '.......S........',
+        '.....######.....',
+        '................',
+        '................',
+        '.....######.....',
+        '................',
+        '................',
+        '.....######.....',
+        '................',
+        '................',
+        '.....######.....',
+        '................',
+        '.....####G##....',
+        '................',
+      ],
+    },
+    {
+      // Solution: 7-block bridge across row 2 cols 9..14. Bear walks the
+      // length of the start platform plus the bridge, drops off at col 15,
+      // and lands on the lone cake at the bottom-right. Add a reverse
+      // block at (col 0, row 1) for left-walking bears.
+      name: 'LONG BRIDGE',
+      hint: 'KEEP BUILDING',
+      map: [
+        '................',
+        '..S.............',
+        '.######.........',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '................',
+        '...............G',
+      ],
+    },
+    {
+      // CRAZY MODE — bonus level offered after winning the seven regular
+      // levels. Five spawn doors across the top, 25 Lilians total (5 per
+      // door, burst-spawned), one cake. Authored at the full 20-column
+      // width since this level uses the wider 4:3 canvas.
+      name: 'CRAZY MODE',
+      hint: 'FIVE DOORS - GOOD LUCK',
+      bears: 25,
+      map: [
+        '....................',
+        '.S....S....S...S...S',
+        '###..###..###..###.#',
+        '....................',
+        '....................',
+        '....................',
+        '..######....######..',
+        '....................',
+        '....................',
+        '....................',
+        '##.....######.....##',
+        '....................',
+        '....................',
+        '......######G#......',
+        '....................',
+      ],
+    },
+  ];
+
+  // -------- Game state --------
+  let levelIdx = 0;
+  let tiles = [];           // 2D char array of the static level
+  let userBlocks = new Set(); // 'col,row' strings
+  let bears = [];
+  let spawnPositions = [];   // multi-door support: each 'S' tile becomes a spawn
+  let goalPositions = [];
+  let spawnTimer = 0;
+  let spawnedCount = 0;
+  let totalBears = 0;       // 1 for level 1, +1 each level (overridable per-level)
+  let savedCount = 0;
+  let diedCount = 0;
+  let levelState = 'splash';  // 'splash' | 'playing' | 'won' | 'failed' | 'skittlesAte' | 'gameover'
+
+  // Skittles — parachuting cat that descends from above the cake on a
+  // 20-second timer. If she reaches the cake before all Lilians are
+  // saved, the level fails.
+  const skittles = {
+    x: 0, y: 0,
+    startY: -20, endY: 0,
+    framesElapsed: 0,
+    totalFrames: 35 * 60, // overwritten per-level in loadLevel
+    pose: 'a',
+    poseFrame: 0,
+    poseToggleAt: 60,
+    active: false,
+  };
+  let cakeExploded = false;
+  // Tracks whether the player has finished crazy mode this run. Once true,
+  // the gameover screen drops the CRAZY MODE button and only offers
+  // PLAY AGAIN. Reset by resetToSplash().
+  let crazyCleared = false;
+  let stateTimer = 0;
+  let frame = 0;
+  let confetti = [];
+  let particles = [];   // explosion particles for popped blocks
+
+  // Keyboard control (Wonderbox): a cursor cell moved with the arrow keys; Space
+  // places/removes a block at it. The active cell is highlighted (see drawCursor).
+  const cursor = { col: Math.floor(COLS / 2), row: Math.floor(ROWS / 2) };
+  // Hold-to-move: the cursor steps once on key-down, then auto-repeats while the key
+  // stays held (driven from update() so the cadence is smooth and platform-independent).
+  const heldDir = { ArrowLeft: false, ArrowRight: false, ArrowUp: false, ArrowDown: false };
+  let repeatTimer = 0;
+  const REPEAT_DELAY = 26; // frames a key must stay held before auto-repeat starts (~0.43s) —
+                           // longer than a normal tap so tapping never double-steps
+  const REPEAT_RATE  = 7;  // frames between steps while held (~8.5 cells/sec — controllable)
+  // Game-over screen offers CRAZY MODE (0) / PLAY AGAIN (1); chosen with left/right.
+  let gameoverSel = 1;
+
+  // Sun state — animated mascot in the sky. Toggles between sun_1/sun_2
+  // every 3–5 seconds; switches to sun_stunned briefly when a bear is lost.
+  let sunPose = 'sun1';
+  let sunToggleFrame = 0;
+  let sunNextToggle = 60 * 4;
+  let sunStunFrames = 0;
+
+  // Drifting clouds. Updated each frame; rendered in drawBackground().
+  const clouds = [
+    { x: 24,  y: 18, w: 30, speed: 0.06 },
+    { x: 110, y: 8,  w: 22, speed: 0.04 },
+    { x: 70,  y: 40, w: 26, speed: 0.05 },
+    { x: 200, y: 28, w: 34, speed: 0.07 },
+  ];
+
+  function loadLevel(idx) {
+    if (idx >= LEVELS.length) {
+      levelState = 'gameover';
+      stateTimer = 0;
+      winFanfare();
+      return;
+    }
+    levelIdx = idx;
+    const def = LEVELS[idx];
+    // Pad each row to COLS and add empty rows up to ROWS so level data
+    // can stay authored at 16 chars even though the canvas is now 20.
+    tiles = def.map.map(row => {
+      const arr = row.split('');
+      while (arr.length < COLS) arr.push('.');
+      return arr;
+    });
+    while (tiles.length < ROWS) tiles.push('.'.repeat(COLS).split(''));
+    userBlocks = new Set();
+    bears = [];
+    goalPositions = [];
+    spawnedCount = 0;
+    savedCount = 0;
+    diedCount = 0;
+    spawnTimer = 60;
+    levelState = 'playing';
+    stateTimer = 0;
+    confetti = [];
+    spawnPositions = [];
+    heldDir.ArrowLeft = heldDir.ArrowRight = heldDir.ArrowUp = heldDir.ArrowDown = false;
+    repeatTimer = 0;
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (tiles[r][c] === 'S') spawnPositions.push({ col: c, row: r });
+        if (tiles[r][c] === 'G') goalPositions.push({ col: c, row: r });
+      }
+    }
+    if (spawnPositions.length === 0) spawnPositions.push({ col: 0, row: 0 });
+    // Start the cursor on the (first) door — where the Lilians appear and the action begins.
+    cursor.col = spawnPositions[0].col;
+    cursor.row = spawnPositions[0].row;
+    // Per-level bear count override (e.g. crazy mode), else +1 per level.
+    totalBears = (def.bears !== undefined) ? def.bears : (1 + idx);
+
+    // Skittles: park her above the (first) cake, descending over 20 s.
+    cakeExploded = false;
+    if (goalPositions.length > 0) {
+      const goal = goalPositions[0];
+      // Skittles is drawn 28 px tall, cake sprite 18 px tall sitting just
+      // above the goal tile (whose top is goal.row * TILE). Stop her so
+      // her feet land on the cake's top edge — that's the contact frame.
+      const SKITTLES_DRAW_H = 28;
+      const CAKE_DRAW_H     = 18;
+      skittles.x = goal.col * TILE + TILE / 2;
+      skittles.startY = -SKITTLES_DRAW_H;
+      skittles.endY = goal.row * TILE - CAKE_DRAW_H + 1 - SKITTLES_DRAW_H;
+      // Descent: regular 61 s / crazy 52 s (slowed 10% from 55 / 47 s).
+      const isCrazy = idx === LEVELS.length - 1;
+      skittles.totalFrames = (isCrazy ? 52 : 61) * 60;
+      skittles.framesElapsed = 0;
+      skittles.y = skittles.startY;
+      skittles.pose = 'a';
+      skittles.poseFrame = 0;
+      skittles.poseToggleAt = 60 + Math.floor(Math.random() * 121); // 1–3 s
+      skittles.active = true;
+    } else {
+      skittles.active = false;
+    }
+
+    startMusic();
+  }
+
+  // Don't auto-load the first level — show the splash screen and wait
+  // for the user to press Space / tap.
+
+  // Tear down any in-flight gameplay state and return to the splash, so
+  // that finishing the game (or invoking this from anywhere) lands on
+  // the same screen a fresh page refresh would.
+  // Frames during which the splash screen ignores input. Prevents the
+  // same gesture (keyboard auto-repeat, or touchstart synthesizing a
+  // mousedown) that dismissed the gameover screen from immediately
+  // re-firing and skipping the splash entirely.
+  let splashInputCooldown = 0;
+
+  function resetToSplash() {
+    levelState = 'splash';
+    stateTimer = 0;
+    bears = [];
+    userBlocks = new Set();
+    spawnedCount = 0;
+    savedCount = 0;
+    diedCount = 0;
+    spawnTimer = 60;
+    particles = [];
+    confetti = [];
+    sunStunFrames = 0;
+    splashInputCooldown = 30; // ~half a second
+    crazyCleared = false;
+    gameoverSel = 1;
+  }
+
+  // -------- Tile queries --------
+  function tileAt(col, row) {
+    if (row < 0 || row >= ROWS) return '.';
+    if (col < 0 || col >= COLS) return '#'; // off-grid sides act as walls
+    return tiles[row][col];
+  }
+  function isSolid(col, row) {
+    const t = tileAt(col, row);
+    if (t === '#' || t === 'G') return true;
+    if (col >= 0 && col < COLS && row >= 0 && row < ROWS &&
+        userBlocks.has(col + ',' + row)) return true;
+    return false;
+  }
+  function isGoal(col, row) {
+    return tileAt(col, row) === 'G';
+  }
+  function isPlaceable(col, row) {
+    if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return false;
+    const t = tiles[row][col];
+    return t === '.';
+  }
+
+  // -------- Input (keyboard only) --------
+
+  // Place a block on an empty tile, or destroy a user-placed one (at the cursor, via Space).
+  function toggleBlock(col, row) {
+    if (!isPlaceable(col, row)) { denySfx(); return; }   // door / wall / cake → negative noise
+    const key = col + ',' + row;
+    if (userBlocks.has(key)) {
+      userBlocks.delete(key);
+      spawnExplosion(col, row);
+      explodeSfx();
+    } else {
+      userBlocks.add(key);
+      placeSfx();
+    }
+  }
+
+  // Move the keyboard cursor one cell, clamped to the board. The soft tick is
+  // suppressed (silent) on auto-repeat steps so a held key doesn't buzz.
+  function moveCursor(code, silent) {
+    if (code === 'ArrowLeft')  cursor.col = Math.max(0, cursor.col - 1);
+    else if (code === 'ArrowRight') cursor.col = Math.min(COLS - 1, cursor.col + 1);
+    else if (code === 'ArrowUp')    cursor.row = Math.max(0, cursor.row - 1);
+    else if (code === 'ArrowDown')  cursor.row = Math.min(ROWS - 1, cursor.row + 1);
+    if (!silent) cursorSfx();
+  }
+  // Some browsers (Safari especially) keep the page in their back-forward
+  // cache even on a regular refresh. When that happens, the JS doesn't
+  // re-run, so the in-memory level / state survives. Detect a bfcache
+  // restore and reset to the splash + level 1.
+  window.addEventListener('pageshow', e => {
+    if (e.persisted) {
+      levelIdx = 0;
+      resetToSplash();
+      splashInputCooldown = 0;
+    }
+  });
+
+  // Birthday Bear is SINGLE-PLAYER: it reads keydown events that the Wonderbox SDK synthesises from
+  // the AGGREGATE of every controller (any pad — or the keyboard — drives the game). This is unchanged
+  // by the SDK's multiplayer support; a 2-player game would instead use Wonderbox.player(1)/player(2).
+  // Keyboard is the primary control on the Wonderbox (the console forwards arrows +
+  // Space/Enter through the SDK). Arrows move the cursor / pick a menu button; Space
+  // is the action button (place-or-remove a block, or advance/confirm a screen).
+  window.addEventListener('keydown', e => {
+    if (e.repeat) return; // ignore keyboard auto-repeat
+    // Don't hijack browser shortcuts (Cmd/Ctrl+R refresh, etc.) — modifier combos pass through.
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const code = e.code;
+
+    // Welcome screen: any button starts the game.
+    if (levelState === 'splash') {
+      e.preventDefault();
+      if (splashInputCooldown <= 0) { if (!Wonderbox.music.playing()) startMusic(); loadLevel(0); }
+      return;
+    }
+
+    if (code === 'ArrowLeft' || code === 'ArrowRight' || code === 'ArrowUp' || code === 'ArrowDown') {
+      e.preventDefault();
+      if (levelState === 'playing') {
+        // Step once now, then let update() auto-repeat while the key is held.
+        if (!heldDir[code]) {
+          heldDir[code] = true;
+          moveCursor(code);
+          repeatTimer = REPEAT_DELAY;
+        }
+      } else if (levelState === 'gameover' && !crazyCleared) {
+        // Pick between CRAZY MODE (left) and PLAY AGAIN (right).
+        if (code === 'ArrowLeft' && gameoverSel !== 0) { gameoverSel = 0; cursorSfx(); }
+        else if (code === 'ArrowRight' && gameoverSel !== 1) { gameoverSel = 1; cursorSfx(); }
+      }
+      return;
+    }
+
+    if (code === 'Space' || code === 'Enter') {
+      e.preventDefault();
+      if (!Wonderbox.music.playing()) startMusic();
+      if (levelState === 'playing') toggleBlock(cursor.col, cursor.row);
+      else if (levelState === 'splash') { if (splashInputCooldown <= 0) loadLevel(0); }
+      else if (levelState === 'won') loadLevel(levelIdx + 1);
+      else if (levelState === 'failed' || levelState === 'skittlesAte') loadLevel(levelIdx);
+      else if (levelState === 'gameover') {
+        if (!crazyCleared && gameoverSel === 0) loadLevel(LEVELS.length - 1);
+        else resetToSplash();
+      }
+      return;
+    }
+
+    // Wonderbox buttons: B (canonical Backspace) = retry; SELECT (canonical Tab) = skip (debug).
+    if (code === 'Backspace') { e.preventDefault(); loadLevel(levelIdx); }
+    else if (code === 'Tab') { e.preventDefault(); loadLevel(levelIdx + 1); }
+  });
+
+  // Releasing an arrow stops the hold-to-move auto-repeat for that direction.
+  window.addEventListener('keyup', e => {
+    if (e.code in heldDir) heldDir[e.code] = false;
+  });
+
+  // -------- Bear --------
+  const BEAR_W = 10;
+  const BEAR_H = 14;
+
+  function spawnBearAt(sp) {
+    const cx = sp.col * TILE + TILE / 2;
+    bears.push({
+      x: cx - BEAR_W / 2,
+      y: sp.row * TILE,
+      vy: 0,
+      facing: Math.random() < 0.5 ? -1 : 1,
+      onGround: false,
+      alive: true,
+      saved: false,
+      dying: 0,
+      anim: Math.floor(Math.random() * 60),
+    });
+  }
+  // Burst-spawns one Lilian per door simultaneously. With a single door
+  // (regular levels) this matches the previous behaviour exactly. With
+  // multiple doors (crazy mode) all doors emit at the same cadence so
+  // the player gets parallel waves to manage.
+  function spawnWave() {
+    for (const sp of spawnPositions) {
+      if (spawnedCount >= totalBears) break;
+      spawnBearAt(sp);
+      spawnedCount++;
+    }
+  }
+
+  // Returns true if any tile in [colA..colB] at given row is solid
+  function anySolidRowSpan(colA, colB, row) {
+    const c0 = Math.min(colA, colB), c1 = Math.max(colA, colB);
+    for (let c = c0; c <= c1; c++) if (isSolid(c, row)) return true;
+    return false;
+  }
+
+  function updateBear(b) {
+    if (!b.alive) {
+      b.dying++;
+      return;
+    }
+    b.anim++;
+    const wasOnGround = b.onGround;
+
+    const SPEED = 0.1056; // sped up another 10% (was 0.096)
+
+    // Foot row test: row immediately below the body.
+    const leftCol  = Math.floor(b.x / TILE);
+    const rightCol = Math.floor((b.x + BEAR_W - 0.01) / TILE);
+    const footRow  = Math.floor((b.y + BEAR_H + 0.5) / TILE);
+    const onAnything = anySolidRowSpan(leftCol, rightCol, footRow);
+
+    if (onAnything && !b.onGround && b.vy >= 0) {
+      // snap to top of the platform we just entered
+      b.y = footRow * TILE - BEAR_H;
+      b.vy = 0;
+      b.onGround = true;
+    }
+    if (!onAnything) {
+      b.onGround = false;
+    }
+
+    if (b.onGround) {
+      // Walk
+      const dx = b.facing * SPEED;
+      const newX = b.x + dx;
+
+      // Probe in-front-of-bear column at the bear's vertical span
+      const probeX = b.facing > 0 ? (newX + BEAR_W) : newX;
+      const probeCol = Math.floor((probeX - (b.facing > 0 ? 0.001 : 0)) / TILE);
+      const topRow = Math.floor((b.y + 1) / TILE);
+      const midRow = Math.floor((b.y + BEAR_H / 2) / TILE);
+      const botRow = Math.floor((b.y + BEAR_H - 1) / TILE);
+
+      const blocked = isSolid(probeCol, topRow) ||
+                      isSolid(probeCol, midRow) ||
+                      isSolid(probeCol, botRow);
+
+      if (blocked) {
+        b.facing *= -1;
+        turnSfx();
+      } else {
+        b.x = newX;
+      }
+
+      // After moving, re-check if we walked off the platform
+      const lc = Math.floor(b.x / TILE);
+      const rc = Math.floor((b.x + BEAR_W - 0.01) / TILE);
+      const fr = Math.floor((b.y + BEAR_H + 0.5) / TILE);
+      if (!anySolidRowSpan(lc, rc, fr)) {
+        b.onGround = false;
+        b.vy = 0;
+      }
+    } else {
+      // Falling
+      b.vy += 0.3;
+      if (b.vy > 4.5) b.vy = 4.5;
+
+      // Step down a pixel at a time so we never tunnel through a thin tile
+      const steps = Math.max(1, Math.ceil(b.vy));
+      const dyStep = b.vy / steps;
+      for (let i = 0; i < steps; i++) {
+        b.y += dyStep;
+        const lc = Math.floor(b.x / TILE);
+        const rc = Math.floor((b.x + BEAR_W - 0.01) / TILE);
+        const fr = Math.floor((b.y + BEAR_H + 0.5) / TILE);
+        if (anySolidRowSpan(lc, rc, fr)) {
+          b.y = fr * TILE - BEAR_H;
+          b.vy = 0;
+          b.onGround = true;
+          break;
+        }
+      }
+    }
+
+    // Cute "wee!" SFX on the transition from grounded to airborne.
+    // Per-bear, fires once per fall (next frame wasOnGround is already
+    // false, so it doesn't retrigger mid-air).
+    if (wasOnGround && !b.onGround) weeSfx();
+
+    // Goal check — feet stand on a goal tile
+    if (b.onGround) {
+      const lc = Math.floor(b.x / TILE);
+      const rc = Math.floor((b.x + BEAR_W - 0.01) / TILE);
+      const fr = Math.floor((b.y + BEAR_H + 0.5) / TILE);
+      if (isGoal(lc, fr) || isGoal(rc, fr)) {
+        b.alive = false;
+        b.saved = true;
+        b.dying = 0;
+        savedCount++;
+        saveSfx();
+        // confetti
+        for (let i = 0; i < 12; i++) {
+          confetti.push({
+            x: b.x + BEAR_W / 2,
+            y: b.y + BEAR_H / 2,
+            vx: (Math.random() - 0.5) * 2,
+            vy: -1 - Math.random() * 1.5,
+            life: 60,
+            color: ['#fc74b4','#fcfc00','#5cf4fc','#74fc74','#fcfcfc'][Math.floor(Math.random()*5)],
+          });
+        }
+      }
+    }
+
+    // Death — fell off bottom
+    if (b.y > ROWS * TILE + 4) {
+      b.alive = false;
+      b.dying = 0;
+      diedCount++;
+      sunStunFrames = 90; // 1.5 s of stunned sun
+      dieSfx();
+    }
+  }
+
+  function update() {
+    frame++;
+    if (levelState === 'playing') {
+      // Hold-to-move: after the initial step (on key-down), auto-repeat the cursor while a
+      // direction is held — wait REPEAT_DELAY frames, then step every REPEAT_RATE frames.
+      const dirs = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].filter(d => heldDir[d]);
+      if (dirs.length) {
+        if (repeatTimer > 0) repeatTimer--;
+        if (repeatTimer <= 0) { for (const d of dirs) moveCursor(d, true); repeatTimer = REPEAT_RATE; }
+      }
+
+      // Spawn bears on a timer. Each tick is a wave — one Lilian per
+      // active spawn door — so single-door levels are unchanged but
+      // crazy mode emits 5 at a time.
+      if (spawnedCount < totalBears) {
+        spawnTimer--;
+        if (spawnTimer <= 0) {
+          spawnWave();
+          spawnTimer = 70;
+        }
+      }
+      bears.forEach(updateBear);
+      // Drop bears whose dying anim finished
+      bears = bears.filter(b => b.alive || b.dying < 30);
+
+      // Skittles descent
+      if (skittles.active) {
+        skittles.framesElapsed++;
+        skittles.poseFrame++;
+        if (skittles.poseFrame >= skittles.poseToggleAt) {
+          skittles.poseFrame = 0;
+          skittles.poseToggleAt = 60 + Math.floor(Math.random() * 121);
+          skittles.pose = skittles.pose === 'a' ? 'b' : 'a';
+        }
+        const t = Math.min(1, skittles.framesElapsed / skittles.totalFrames);
+        skittles.y = skittles.startY + t * (skittles.endY - skittles.startY);
+        if (skittles.framesElapsed >= skittles.totalFrames) {
+          // Skittles ate the cake. Game over for this level.
+          skittles.active = false;
+          explodeCake();
+          levelState = 'skittlesAte';
+          stateTimer = 0;
+        }
+      }
+
+      // Fail the moment a single Lilian is lost — don't wait for the
+      // remaining spawns to play out.
+      if (diedCount > 0 && levelState === 'playing') {
+        levelState = 'failed';
+        stateTimer = 0;
+      }
+      // Win when every spawned-and-tracked Lilian has reached the cake.
+      // Guard with state check: Skittles' arrival earlier this same frame
+      // could have already flipped the state to 'skittlesAte'.
+      else if (levelState === 'playing' &&
+               savedCount === totalBears && spawnedCount === totalBears) {
+        const isLast       = levelIdx === LEVELS.length - 1;
+        const isPenultimate = levelIdx === LEVELS.length - 2;
+        // Cake explodes in celebration when the last Lilian is saved.
+        explodeCake();
+        skittles.active = false;
+        if (isLast || isPenultimate) {
+          // Either the final regular level OR crazy mode cleared — show
+          // the HAPPY BIRTHDAY screen, which itself offers crazy mode.
+          if (isLast) crazyCleared = true;
+          levelState = 'gameover';
+          stateTimer = 0;
+          winFanfare();
+        } else {
+          levelState = 'won';
+          stateTimer = 0;
+          levelSfx();
+        }
+      }
+    } else {
+      stateTimer++;
+    }
+    if (splashInputCooldown > 0) splashInputCooldown--;
+
+    // Update confetti
+    for (const c of confetti) {
+      c.x += c.vx;
+      c.y += c.vy;
+      c.vy += 0.08;
+      c.life--;
+    }
+    confetti = confetti.filter(c => c.life > 0);
+
+    // Update explosion particles
+    for (const p of particles) {
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.18;
+      p.life--;
+    }
+    particles = particles.filter(p => p.life > 0);
+
+    // Update clouds (slow horizontal drift, wrap around)
+    for (const cl of clouds) {
+      cl.x += cl.speed;
+      if (cl.x > W + 8) cl.x = -cl.w - 8;
+    }
+
+    // Update sun: stunned overrides toggle
+    if (sunStunFrames > 0) {
+      sunStunFrames--;
+    } else {
+      sunToggleFrame++;
+      if (sunToggleFrame >= sunNextToggle) {
+        sunToggleFrame = 0;
+        sunNextToggle = 60 * 3 + Math.floor(Math.random() * 60 * 2); // 3–5 s
+        sunPose = sunPose === 'sun1' ? 'sun2' : 'sun1';
+      }
+    }
+  }
+
+  function spawnExplosion(col, row) {
+    const cx = col * TILE + TILE / 2;
+    const cy = row * TILE + TILE / 2;
+    const colors = ['#fcb878', '#fc7460', '#fcfc00', '#a85820', '#fcfcfc'];
+    for (let i = 0; i < 14; i++) {
+      const ang = (i / 14) * Math.PI * 2 + Math.random() * 0.4;
+      const spd = 1.2 + Math.random() * 1.6;
+      particles.push({
+        x: cx, y: cy,
+        vx: Math.cos(ang) * spd,
+        vy: Math.sin(ang) * spd - 0.8,
+        life: 22 + Math.floor(Math.random() * 12),
+        color: colors[Math.floor(Math.random() * colors.length)],
+      });
+    }
+  }
+
+  // Bigger, more frosting-colored burst for the cake itself. Triggered
+  // both on Skittles arrival (failure) and the last-Lilian save (win).
+  function explodeCake() {
+    if (cakeExploded) return;
+    cakeExploded = true;
+    const goal = goalPositions[0];
+    if (!goal) return;
+    const cx = goal.col * TILE + TILE / 2;
+    const cy = goal.row * TILE - 6;
+    const colors = ['#fc74b4', '#fcfcfc', '#fcfc00', '#fc7460', '#fc4040', '#a83020'];
+    for (let i = 0; i < 36; i++) {
+      const ang = (i / 36) * Math.PI * 2 + Math.random() * 0.5;
+      const spd = 1.6 + Math.random() * 2.6;
+      particles.push({
+        x: cx, y: cy,
+        vx: Math.cos(ang) * spd,
+        vy: Math.sin(ang) * spd - 1.2,
+        life: 32 + Math.floor(Math.random() * 24),
+        color: colors[Math.floor(Math.random() * colors.length)],
+      });
+    }
+    // bigger boom
+    explodeSfx();
+    setTimeout(() => beep(80, 0.25, 'sawtooth', 0.06), 60);
+  }
+
+  // -------- Drawing --------
+  const PAL = {
+    skyTop:  '#5c94fc',
+    skyBot:  '#a8d8fc',
+    cloud:   '#fcfcfc',
+    cloudSh: '#bcd8fc',
+    grass:   '#00a800',
+    grassHi: '#74fc78',
+    grassLo: '#007800',
+    soil:    '#a85820',
+    soilHi:  '#c87838',
+    soilLo:  '#683018',
+    wood:    '#d8a060',
+    woodHi:  '#fcd898',
+    woodLo:  '#783818',
+    cakeA:   '#fcfcfc',
+    cakeB:   '#fc74b4',
+    cakeC:   '#a83020',
+    cakeY:   '#fcfc00',
+    text:    '#fcfcfc',
+    shadow:  '#000000',
+    spawn:   '#5cf4fc',
+    spawnDk: '#206878',
+    grid:    '#7cb8fc',
+  };
+
+  function drawBackground() {
+    // Sky gradient (light blue at top to slightly paler near horizon)
+    const bands = 6;
+    for (let i = 0; i < bands; i++) {
+      const t = i / (bands - 1);
+      const r = Math.round(0x5c * (1 - t) + 0xa8 * t);
+      const g = Math.round(0x94 * (1 - t) + 0xd8 * t);
+      const b = Math.round(0xfc * (1 - t) + 0xfc * t);
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fillRect(0, (i * H) / bands, W, H / bands + 1);
+    }
+    // Drifting clouds in the upper portion of the sky
+    for (const cl of clouds) drawCloud(cl);
+    // Faint grid so players can read tile boundaries
+    ctx.fillStyle = PAL.grid;
+    ctx.globalAlpha = 0.18;
+    for (let c = 1; c < COLS; c++) ctx.fillRect(c * TILE, 0, 1, H);
+    for (let r = 1; r < ROWS; r++) ctx.fillRect(0, r * TILE, W, 1);
+    ctx.globalAlpha = 1;
+  }
+
+  function drawCloud(c) {
+    const x = Math.round(c.x), y = Math.round(c.y), w = c.w;
+    ctx.fillStyle = PAL.cloudSh;
+    ctx.fillRect(x - 1, y + 8, w + 2, 4);   // soft underside
+    ctx.fillStyle = PAL.cloud;
+    ctx.fillRect(x, y + 6, w, 4);           // bottom row
+    ctx.fillRect(x + 2, y + 2, w - 4, 4);   // mid row
+    ctx.fillRect(x + 4, y, 4, 2);           // top bump 1
+    ctx.fillRect(x + Math.floor(w / 2), y, 6, 2); // top bump 2
+  }
+
+  // Grass-on-top, soil-underneath platform tile. The grass cap is only
+  // drawn when the tile above is empty so stacks of platforms look natural.
+  function drawRockTile(col, row) {
+    const x = col * TILE, y = row * TILE;
+    // soil base
+    ctx.fillStyle = PAL.soil;
+    ctx.fillRect(x, y, TILE, TILE);
+    // bottom shadow
+    ctx.fillStyle = PAL.soilLo;
+    ctx.fillRect(x, y + TILE - 2, TILE, 2);
+    // pseudorandom soil speckles
+    const seed = col * 73 + row * 919;
+    const rnd = (n) => {
+      const v = Math.sin(seed + n * 13.7) * 43758.5453;
+      return v - Math.floor(v);
+    };
+    for (let i = 0; i < 4; i++) {
+      const sx = x + 1 + Math.floor(rnd(i) * (TILE - 3));
+      const sy = y + 5 + Math.floor(rnd(i + 7) * (TILE - 7));
+      const c2 = rnd(i + 23);
+      ctx.fillStyle = c2 > 0.66 ? PAL.soilHi : (c2 > 0.33 ? PAL.soilLo : PAL.soil);
+      ctx.fillRect(sx, sy, 2, 2);
+    }
+    // Grass cap (only if nothing solid above)
+    const above = tileAt(col, row - 1);
+    const aboveSolid = above === '#' || above === 'G' ||
+                       userBlocks.has(col + ',' + (row - 1));
+    if (!aboveSolid) {
+      ctx.fillStyle = PAL.grass;
+      ctx.fillRect(x, y, TILE, 4);
+      ctx.fillStyle = PAL.grassHi;
+      ctx.fillRect(x, y, TILE, 1);
+      ctx.fillStyle = PAL.grassLo;
+      ctx.fillRect(x, y + 4, TILE, 1);
+      // a couple of grass blades poking up
+      ctx.fillStyle = PAL.grass;
+      if (rnd(31) > 0.4) ctx.fillRect(x + 2, y - 1, 1, 2);
+      if (rnd(33) > 0.4) ctx.fillRect(x + 8, y - 1, 1, 2);
+      if (rnd(35) > 0.5) ctx.fillRect(x + 13, y - 1, 1, 2);
+    }
+  }
+
+  function drawWoodTile(col, row) {
+    const x = col * TILE, y = row * TILE;
+    // base
+    ctx.fillStyle = PAL.wood;
+    ctx.fillRect(x, y, TILE, TILE);
+    // top highlight
+    ctx.fillStyle = PAL.woodHi;
+    ctx.fillRect(x, y, TILE, 2);
+    ctx.fillRect(x, y, 2, TILE);
+    // bottom/right shadow
+    ctx.fillStyle = PAL.woodLo;
+    ctx.fillRect(x, y + TILE - 2, TILE, 2);
+    ctx.fillRect(x + TILE - 2, y, 2, TILE);
+    // grain
+    ctx.fillStyle = PAL.woodLo;
+    ctx.fillRect(x + 3, y + 6, TILE - 6, 1);
+    ctx.fillRect(x + 4, y + 11, TILE - 8, 1);
+  }
+
+  function drawSpawn(col, row) {
+    const x = col * TILE, y = row * TILE;
+    const t = (frame * 0.12);
+    // arch
+    ctx.fillStyle = PAL.spawnDk;
+    ctx.fillRect(x + 2, y + 2, TILE - 4, TILE - 2);
+    ctx.fillStyle = PAL.spawn;
+    const pulse = (Math.sin(t) + 1) * 0.5;
+    ctx.globalAlpha = 0.4 + 0.4 * pulse;
+    ctx.fillRect(x + 4, y + 4, TILE - 8, TILE - 6);
+    ctx.globalAlpha = 1;
+    // little arrow indicator
+    ctx.fillStyle = PAL.text;
+    ctx.fillRect(x + 7, y + 13, 2, 2);
+  }
+
+  function drawCake(col, row) {
+    // Cake sits on a platform tile. Draw the rock under it, then the
+    // cake sprite centered just above the platform.
+    drawRockTile(col, row);
+    if (cakeExploded) return; // suppress cake + flame after the boom
+    const cx = col * TILE + TILE / 2;
+    const top = row * TILE;
+    const cakeW = 18, cakeH = 18;
+    if (cakeImg.complete && cakeImg.naturalWidth > 0) {
+      ctx.drawImage(cakeImg, Math.round(cx - cakeW / 2), top - cakeH + 1, cakeW, cakeH);
+    } else {
+      ctx.fillStyle = PAL.cakeB;
+      ctx.fillRect(cx - 6, top - 8, 12, 8);
+    }
+
+    // Flickering candle flame on top of the cake. Tiny sub-pixel pattern
+    // animated on a slow frame counter so it dances rather than buzzing.
+    const flameY = top - cakeH + 1; // top edge of cake sprite
+    const phase = Math.floor(frame / 6) % 4;
+    const yellow = '#fcfc00';
+    const orange = '#fc7460';
+    const white  = '#fcfcfc';
+    // tip pixel (yellow / white sparkle)
+    ctx.fillStyle = (phase === 1 || phase === 3) ? white : yellow;
+    ctx.fillRect(Math.round(cx) - 1, flameY - 4, 1, 1);
+    // body pixels
+    ctx.fillStyle = yellow;
+    ctx.fillRect(Math.round(cx) - 1, flameY - 3, 1, 1);
+    if (phase % 2 === 0) {
+      ctx.fillRect(Math.round(cx),     flameY - 3, 1, 1);
+    } else {
+      ctx.fillRect(Math.round(cx) - 2, flameY - 3, 1, 1);
+    }
+    // base pixels (orange)
+    ctx.fillStyle = orange;
+    ctx.fillRect(Math.round(cx) - 2, flameY - 2, 3, 1);
+    if (phase === 2) {
+      ctx.fillRect(Math.round(cx) - 1, flameY - 1, 2, 1);
+    }
+  }
+
+  function drawTiles() {
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const t = tiles[r][c];
+        if (t === '#') drawRockTile(c, r);
+        else if (t === 'S') drawSpawn(c, r);
+        else if (t === 'G') drawCake(c, r);
+      }
+    }
+    for (const key of userBlocks) {
+      const [c, r] = key.split(',').map(Number);
+      drawWoodTile(c, r);
+    }
+  }
+
+  function drawBear(b) {
+    let img;
+    if (!b.alive) {
+      img = bearSprites.stand;
+    } else if (!b.onGround) {
+      img = bearSprites.jump;
+    } else {
+      img = Math.floor(b.anim / 14) % 2 === 0 ? bearSprites.walk1 : bearSprites.walk2;
+    }
+    // Display each sprite at its natural aspect ratio against a fixed
+    // height. The walk PNGs have different canvas widths (293 vs 268),
+    // so forcing a uniform display width was misaligning the character
+    // between frames and producing a visible jitter.
+    // Visual height is just under the tile size (16) so the character
+    // reads as fractionally smaller than the blocks they walk on.
+    const H_D = 14;
+    let W_D = 12;
+    if (img && img.complete && img.naturalHeight > 0) {
+      W_D = H_D * img.naturalWidth / img.naturalHeight;
+    }
+    const cx = Math.round(b.x + BEAR_W / 2);
+    const baseY = Math.round(b.y + BEAR_H);
+    const dx = Math.round(cx - W_D / 2);
+    const dy = baseY - H_D;
+
+    // Saved bears float upward briefly with sparkles
+    let alpha = 1;
+    let yOffset = 0;
+    if (!b.alive) {
+      if (b.saved) {
+        yOffset = -b.dying * 1.2;
+        alpha = Math.max(0, 1 - b.dying / 30);
+      } else {
+        // dying — fading
+        alpha = Math.max(0, 1 - b.dying / 20);
+      }
+    }
+    if (alpha < 1) ctx.globalAlpha = alpha;
+
+    if (!img || !img.complete || img.naturalWidth === 0) {
+      ctx.fillStyle = PAL.wood;
+      ctx.fillRect(dx, dy + yOffset, W_D, H_D);
+    } else if (b.facing < 0) {
+      ctx.save();
+      ctx.translate(cx, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(img, -W_D / 2, dy + yOffset, W_D, H_D);
+      ctx.restore();
+    } else {
+      ctx.drawImage(img, dx, dy + yOffset, W_D, H_D);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawSun() {
+    const stunned = sunStunFrames > 0;
+    const img = stunned ? sunSprites.stunned : sunSprites[sunPose];
+    if (!img || !img.complete || img.naturalWidth === 0) return;
+    // Slightly larger when stunned (the sprite has lightning bolts that
+    // extend past the disk). Anchored to the top-right corner.
+    const h = stunned ? 36 : 30;
+    const w = h * img.naturalWidth / img.naturalHeight;
+    const px = W - Math.round(w) - 3;
+    const py = 3;
+    ctx.drawImage(img, px, py, w, h);
+  }
+
+  function drawParticles() {
+    for (const p of particles) {
+      ctx.fillStyle = p.color;
+      ctx.fillRect(Math.round(p.x), Math.round(p.y), 2, 2);
+    }
+  }
+
+  function drawConfetti() {
+    for (const c of confetti) {
+      ctx.fillStyle = c.color;
+      ctx.fillRect(Math.round(c.x), Math.round(c.y), 2, 2);
+    }
+  }
+
+  // -------- Tiny pixel font (5x5) --------
+  const FONT = {
+    'A':['01110','10001','11111','10001','10001'],
+    'B':['11110','10001','11110','10001','11110'],
+    'C':['01111','10000','10000','10000','01111'],
+    'D':['11110','10001','10001','10001','11110'],
+    'E':['11111','10000','11110','10000','11111'],
+    'F':['11111','10000','11110','10000','10000'],
+    'G':['01111','10000','10011','10001','01111'],
+    'H':['10001','10001','11111','10001','10001'],
+    'I':['11111','00100','00100','00100','11111'],
+    'J':['00111','00010','00010','10010','01100'],
+    'K':['10001','10010','11100','10010','10001'],
+    'L':['10000','10000','10000','10000','11111'],
+    'M':['10001','11011','10101','10001','10001'],
+    'N':['10001','11001','10101','10011','10001'],
+    'O':['01110','10001','10001','10001','01110'],
+    'P':['11110','10001','11110','10000','10000'],
+    'Q':['01110','10001','10101','10010','01101'],
+    'R':['11110','10001','11110','10010','10001'],
+    'S':['01111','10000','01110','00001','11110'],
+    'T':['11111','00100','00100','00100','00100'],
+    'U':['10001','10001','10001','10001','01110'],
+    'V':['10001','10001','10001','01010','00100'],
+    'W':['10001','10001','10101','11011','10001'],
+    'X':['10001','01010','00100','01010','10001'],
+    'Y':['10001','01010','00100','00100','00100'],
+    'Z':['11111','00010','00100','01000','11111'],
+    '0':['01110','10011','10101','11001','01110'],
+    '1':['00100','01100','00100','00100','01110'],
+    '2':['01110','10001','00110','01000','11111'],
+    '3':['11110','00001','01110','00001','11110'],
+    '4':['10001','10001','11111','00001','00001'],
+    '5':['11111','10000','11110','00001','11110'],
+    '6':['01110','10000','11110','10001','01110'],
+    '7':['11111','00001','00010','00100','01000'],
+    '8':['01110','10001','01110','10001','01110'],
+    '9':['01110','10001','01111','00001','01110'],
+    ' ':['00000','00000','00000','00000','00000'],
+    ':':['00000','00100','00000','00100','00000'],
+    '!':['00100','00100','00100','00000','00100'],
+    "'":['00100','00100','00000','00000','00000'],
+    '/':['00001','00010','00100','01000','10000'],
+    '-':['00000','00000','11111','00000','00000'],
+    '.':['00000','00000','00000','00000','00100'],
+    '(':['00010','00100','00100','00100','00010'],
+    ')':['01000','00100','00100','00100','01000'],
+  };
+  function drawText(str, x, y, color, scale = 1) {
+    ctx.fillStyle = color;
+    str = str.toUpperCase();
+    let cx = x;
+    for (const ch of str) {
+      const g = FONT[ch] || FONT[' '];
+      for (let r = 0; r < 5; r++) {
+        for (let c = 0; c < 5; c++) {
+          if (g[r][c] === '1') ctx.fillRect(cx + c * scale, y + r * scale, scale, scale);
+        }
+      }
+      cx += 6 * scale;
+    }
+  }
+  function drawTextShadow(str, x, y, color, scale = 1) {
+    drawText(str, x + 1, y + 1, PAL.shadow, scale);
+    drawText(str, x, y, color, scale);
+  }
+  function drawTextCentered(str, y, color, scale = 1) {
+    const w = str.length * 6 * scale - scale;
+    drawTextShadow(str, Math.floor((W - w) / 2), y, color, scale);
+  }
+
+  function drawHud() {
+    const lvlStr = (levelIdx === LEVELS.length - 1) ? 'CRAZY' : ('LVL ' + (levelIdx + 1));
+    const savedStr = 'SAVED ' + savedCount + '/' + totalBears;
+    drawTextShadow(lvlStr, 4, 4, PAL.text);
+    drawTextShadow(savedStr, 56, 4, PAL.cakeY);
+    // The stunned sun in the top-right doubles as the lost-counter visual,
+    // so the dedicated LOST text is gone — but if any have been lost, a
+    // small marker appears under the sun.
+    if (diedCount > 0) {
+      const txt = 'X' + diedCount;
+      drawTextShadow(txt, W - txt.length * 6 - 4, 42, '#fc4040');
+    }
+
+    if (levelState === 'playing' && spawnedCount === 0 && bears.length === 0) {
+      const def = LEVELS[levelIdx];
+      drawTextCentered(def.name, 100, PAL.text, 2);
+      drawTextCentered(def.hint, 124, PAL.cakeB, 1);
+    }
+  }
+
+  function drawOverlay() {
+    if (levelState === 'won') {
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(0, 70, W, 100);
+      const bounce = Math.sin(stateTimer * 0.15) * 2;
+      drawTextCentered('LEVEL CLEAR', Math.round(86 + bounce), PAL.cakeY, 2);
+      drawTextCentered('SPACE FOR NEXT LEVEL', 130, PAL.text, 1);
+    } else if (levelState === 'failed') {
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(0, 80, W, 80);
+      drawTextCentered('A LILIAN WAS LOST', 92, '#fc7460', 2);
+      drawTextCentered('SPACE TO RETRY', 124, PAL.text, 1);
+    } else if (levelState === 'skittlesAte') {
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(0, 78, W, 92);
+      drawTextCentered('SKITTLES ATE THE CAKE!', 92, '#fc74b4', 2);
+      drawTextCentered('SPACE TO RETRY', 132, PAL.text, 1);
+    } else if (levelState === 'gameover') {
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(0, 50, W, 160);
+      const colors = [PAL.cakeB, PAL.cakeY, PAL.cakeA, '#5cf4fc', '#74fc74'];
+      const msg = 'HAPPY BIRTHDAY!';
+      const scale = 2;
+      const totalW = msg.length * 6 * scale - scale;
+      const sx = Math.floor((W - totalW) / 2);
+      for (let i = 0; i < msg.length; i++) {
+        const ch = msg[i];
+        const g = FONT[ch] || FONT[' '];
+        const bb = Math.sin((stateTimer * 0.15) + i * 0.6) * 3;
+        const yo = Math.floor(86 + bb);
+        for (let r = 0; r < 5; r++) {
+          for (let c = 0; c < 5; c++) {
+            if (g[r][c] === '1') {
+              ctx.fillStyle = PAL.shadow;
+              ctx.fillRect(sx + i * 6 * scale + c * scale + 1, yo + r * scale + 1, scale, scale);
+              ctx.fillStyle = colors[(i + Math.floor(stateTimer / 8)) % colors.length];
+              ctx.fillRect(sx + i * 6 * scale + c * scale, yo + r * scale, scale, scale);
+            }
+          }
+        }
+      }
+      drawTextCentered('ALL LILIANS REACHED THE CAKE', 122, PAL.text, 1);
+      drawTextCentered('GO BEAR! 12 YEARS A CHAMPION', 138, PAL.cakeB, 1);
+      drawTextCentered('LOVE YOU!!', 150, PAL.cakeB, 1);
+      const btnY = 168, btnH = 24;
+      const drawBtnLabel = (text, x, w) => {
+        const tw = text.length * 6 - 1;
+        drawText(text, Math.round(x + (w - tw) / 2), btnY + 10, '#000', 1);
+      };
+      if (crazyCleared) {
+        // After conquering crazy mode there's only one option.
+        const w = 130, x = (W - w) / 2;
+        ctx.fillStyle = '#fcfcfc';
+        ctx.fillRect(x, btnY, w, btnH);
+        drawBtnLabel('PLAY AGAIN', x, w);
+        drawTextCentered('PRESS SPACE TO RESTART', 200, PAL.cakeY, 1);
+      } else {
+        // Two-button choice: crazy mode (left) vs play again (right). The current
+        // selection (gameoverSel, moved with left/right) gets a bright outline.
+        const lW = 110, lX = W / 4 - lW / 2;
+        const rW = 110, rX = (3 * W) / 4 - rW / 2;
+        ctx.fillStyle = '#fc74b4';
+        ctx.fillRect(lX, btnY, lW, btnH);
+        ctx.fillStyle = '#fcfcfc';
+        ctx.fillRect(rX, btnY, rW, btnH);
+        drawBtnLabel('CRAZY MODE', lX, lW);
+        drawBtnLabel('PLAY AGAIN', rX, rW);
+        // Selection outline around the chosen button.
+        const selX = gameoverSel === 0 ? lX : rX;
+        const selW = gameoverSel === 0 ? lW : rW;
+        ctx.fillStyle = PAL.cakeY;
+        ctx.fillRect(selX - 2, btnY - 2, selW + 4, 2);
+        ctx.fillRect(selX - 2, btnY + btnH, selW + 4, 2);
+        ctx.fillRect(selX - 2, btnY - 2, 2, btnH + 4);
+        ctx.fillRect(selX + selW, btnY - 2, 2, btnH + 4);
+        drawTextCentered('LEFT / RIGHT THEN SPACE', 200, PAL.cakeY, 1);
+      }
+      // Spawn confetti continuously
+      if (stateTimer % 3 === 0) {
+        for (let i = 0; i < 2; i++) {
+          confetti.push({
+            x: Math.random() * W,
+            y: -2,
+            vx: (Math.random() - 0.5) * 1.5,
+            vy: 1 + Math.random() * 1.2,
+            life: 200,
+            color: colors[Math.floor(Math.random() * colors.length)],
+          });
+        }
+      }
+    }
+  }
+
+  function drawSplash() {
+    drawBackground();   // sky + drifting clouds
+    if (splashImg.complete && splashImg.naturalWidth > 0) {
+      const size = 144;
+      const x = Math.floor((W - size) / 2);
+      const y = 6;
+      ctx.drawImage(splashImg, x, y, size, size);
+    }
+    drawTextCentered('PLACE BLOCKS TO SAVE THE WANDERING LILIANS', 158, PAL.text, 1);
+    drawTextCentered('STEER THEM TO THE CAKE', 172, PAL.text, 1);
+    drawTextCentered('...BEFORE SKITTLES EATS IT!', 184, '#fc74b4', 1);
+    if (Math.floor(frame / 30) % 2 === 0) {
+      drawTextCentered('PRESS ANY BUTTON TO START', 204, PAL.cakeY, 1);
+    }
+    const year = new Date().getFullYear();
+    drawTextCentered('(C) ' + year + ' STEPHEN HARDISTY', 224, PAL.text, 1);
+  }
+
+  function drawSkittles() {
+    if (!skittles.active) return;
+    const img = skittlesSprites[skittles.pose];
+    if (!img || !img.complete || img.naturalWidth === 0) return;
+    const H = 28;
+    const W_S = H * img.naturalWidth / img.naturalHeight;
+    const dx = Math.round(skittles.x - W_S / 2);
+    const dy = Math.round(skittles.y);
+    ctx.drawImage(img, dx, dy, W_S, H);
+  }
+
+  // Semi-transparent overlay grid + the highlighted active cell (the keyboard cursor).
+  // Shown only while playing. The colour signals what Space will do at the cell:
+  // green = place on empty, red = remove a placed block, grey = blocked (wall/spawn/cake).
+  function drawCursor() {
+    // A faint grid overlay so cells are easy to read while navigating with the arrows.
+    ctx.fillStyle = PAL.grid;
+    ctx.globalAlpha = 0.12;
+    for (let c = 1; c < COLS; c++) ctx.fillRect(c * TILE, 0, 1, H);
+    for (let r = 1; r < ROWS; r++) ctx.fillRect(0, r * TILE, W, 1);
+    ctx.globalAlpha = 1;
+
+    const x = cursor.col * TILE, y = cursor.row * TILE;
+    const occupied  = userBlocks.has(cursor.col + ',' + cursor.row);
+    const placeable = isPlaceable(cursor.col, cursor.row);
+    const pulse = (Math.sin(frame * 0.18) + 1) * 0.5;
+    const rgb = occupied ? '252,116,96' : (placeable ? '116,252,120' : '188,216,252');
+    // translucent fill
+    ctx.fillStyle = 'rgba(' + rgb + ',' + (0.12 + 0.18 * pulse).toFixed(3) + ')';
+    ctx.fillRect(x, y, TILE, TILE);
+    // pulsing 1px border around the cell
+    ctx.globalAlpha = 0.55 + 0.45 * pulse;
+    ctx.fillStyle = 'rgb(' + rgb + ')';
+    ctx.fillRect(x, y, TILE, 1);
+    ctx.fillRect(x, y + TILE - 1, TILE, 1);
+    ctx.fillRect(x, y, 1, TILE);
+    ctx.fillRect(x + TILE - 1, y, 1, TILE);
+    ctx.globalAlpha = 1;
+  }
+
+  function draw() {
+    if (levelState === 'splash') {
+      drawSplash();
+      return;
+    }
+    drawBackground();
+    drawSun();
+    drawTiles();
+    drawSkittles();
+    for (const b of bears) drawBear(b);
+    drawParticles();
+    drawConfetti();
+    if (levelState === 'playing') drawCursor();
+    drawHud();
+    drawOverlay();
+  }
+
+  function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+  // Autoplay the music on the welcome screen. The Wonderbox kiosk allows autoplay
+  // (iframe allow="autoplay"); in a plain browser it may be blocked until the first
+  // key, in which case the keydown handler's startMusic() call kicks it off instead.
+  startMusic();
+  loop();
+})();
+</script>
+</body>
+</html>
+
