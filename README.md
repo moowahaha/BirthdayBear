@@ -17,7 +17,7 @@ the UI when you upload it.
    | Field        | Value |
    |--------------|-------|
    | **Name**     | Birthday Bear |
-   | **Description** | A Lemmings-style puzzle: place blocks to steer the wandering Lilians to the cake before Skittles eats it. Arrows move, Space places or removes a block. |
+   | **Description** | A Lemmings-style puzzle: place blocks to steer the wandering Lilians to the cake before Skittles the cat eats it. |
    | **Players**  | Single-player |
    | **Cover art** | `assets/cover-art.png` — upload this as the cover in the modal (optional, ≤2 MB) |
 
