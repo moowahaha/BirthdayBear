@@ -6,10 +6,10 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <title>Birthday Bear</title>
-<!-- Wonderbox game SDK — required for every Wonderbox game. It forwards the console's
+<!-- Mebobox game SDK — required for every Mebobox game. It forwards the console's
      key input to the game (arrows / Space) and owns pause + quit. The console rewrites
      this URL to a copy it serves locally, so the game still works fully offline. -->
-<script src="https://doc-matrix.com/wonderbox.min.js"></script>
+<script src="https://mebobox.com/mebobox.min.js"></script>
 <style>
   html, body {
     margin: 0;
@@ -116,15 +116,15 @@
   loadSkittles('a', 'assets/skittles/skittles-1.png');
   loadSkittles('b', 'assets/skittles/skittles-2.png');
 
-  // -------- Background music (looped) — via the Wonderbox SDK --------
+  // -------- Background music (looped) — via the Mebobox SDK --------
   // The SDK plays the track with plain media playback, so it works cross-origin inside the
   // sandboxed console (no CORS taint, no Web Audio wiring) and starts on autoplay / first input.
   // Sound effects below stay synthesized via the Web Audio context (`audio()`). volume 0.04
   // matches the old 4% music gain on this loudly-mastered track.
-  Wonderbox.music.set('assets/music/Birthday Cartridge.mp3', { volume: 0.04, autoplay: false });
+  Mebobox.music.set('assets/music/Birthday Cartridge.mp3', { volume: 0.04, autoplay: false });
   function startMusic() {
     try { if (actx && actx.state === 'suspended') actx.resume(); } catch (e) {}  // keep the SFX context awake
-    Wonderbox.music.play();
+    Mebobox.music.play();
   }
 
   // -------- Audio --------
@@ -429,7 +429,7 @@
   let confetti = [];
   let particles = [];   // explosion particles for popped blocks
 
-  // Keyboard control (Wonderbox): a cursor cell moved with the arrow keys; Space
+  // Keyboard control (Mebobox): a cursor cell moved with the arrow keys; Space
   // places/removes a block at it. The active cell is highlighted (see drawCursor).
   const cursor = { col: Math.floor(COLS / 2), row: Math.floor(ROWS / 2) };
   // Hold-to-move: the cursor steps once on key-down, then auto-repeats while the key
@@ -616,10 +616,10 @@
     }
   });
 
-  // Birthday Bear is SINGLE-PLAYER: it reads keydown events that the Wonderbox SDK synthesises from
+  // Birthday Bear is SINGLE-PLAYER: it reads keydown events that the Mebobox SDK synthesises from
   // the AGGREGATE of every controller (any pad — or the keyboard — drives the game). This is unchanged
-  // by the SDK's multiplayer support; a 2-player game would instead use Wonderbox.player(1)/player(2).
-  // Keyboard is the primary control on the Wonderbox (the console forwards arrows +
+  // by the SDK's multiplayer support; a 2-player game would instead use Mebobox.player(1)/player(2).
+  // Keyboard is the primary control on the Mebobox (the console forwards arrows +
   // Space/Enter through the SDK). Arrows move the cursor / pick a menu button; Space
   // is the action button (place-or-remove a block, or advance/confirm a screen).
   window.addEventListener('keydown', e => {
@@ -631,7 +631,7 @@
     // Welcome screen: any button starts the game.
     if (levelState === 'splash') {
       e.preventDefault();
-      if (splashInputCooldown <= 0) { if (!Wonderbox.music.playing()) startMusic(); loadLevel(0); }
+      if (splashInputCooldown <= 0) { if (!Mebobox.music.playing()) startMusic(); loadLevel(0); }
       return;
     }
 
@@ -654,7 +654,7 @@
 
     if (code === 'Space' || code === 'Enter') {
       e.preventDefault();
-      if (!Wonderbox.music.playing()) startMusic();
+      if (!Mebobox.music.playing()) startMusic();
       if (levelState === 'playing') toggleBlock(cursor.col, cursor.row);
       else if (levelState === 'splash') { if (splashInputCooldown <= 0) loadLevel(0); }
       else if (levelState === 'won') loadLevel(levelIdx + 1);
@@ -666,7 +666,7 @@
       return;
     }
 
-    // Wonderbox buttons: B (canonical Backspace) = retry; SELECT (canonical Tab) = skip (debug).
+    // Mebobox buttons: B (canonical Backspace) = retry; SELECT (canonical Tab) = skip (debug).
     if (code === 'Backspace') { e.preventDefault(); loadLevel(levelIdx); }
     else if (code === 'Tab') { e.preventDefault(); loadLevel(levelIdx + 1); }
   });
@@ -1527,7 +1527,7 @@
     draw();
     requestAnimationFrame(loop);
   }
-  // Autoplay the music on the welcome screen. The Wonderbox kiosk allows autoplay
+  // Autoplay the music on the welcome screen. The Mebobox kiosk allows autoplay
   // (iframe allow="autoplay"); in a plain browser it may be blocked until the first
   // key, in which case the keydown handler's startMusic() call kicks it off instead.
   startMusic();
